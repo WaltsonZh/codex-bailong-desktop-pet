@@ -237,6 +237,7 @@ class AccountJob(QObject):
             try:self.finished.emit(value,error)
             except RuntimeError:pass  # The application can close during I/O.
         threading.Thread(target=run,name='BailongChatGPT',daemon=True).start()
+from chat_harness import HarnessStream,HarnessModels
 
 class ProviderDialog(QDialog):
     def __init__(self,root,parent=None,embedded=False):
@@ -254,7 +255,7 @@ class ProviderDialog(QDialog):
         self.load_error=''
         try:self.config=load_chat_config(self.root)
         except OSError as error:self.config=copy.deepcopy(CHAT_DEFAULT);self.load_error=str(error)
-        self.drafts={};self.current=None;self.mutation_buttons=[]
+        self.drafts={};self.current=None;self.mutation_buttons=[];self.local_models=[];self.models_job=None;self.effort_value=''
         self.setWindowTitle('白龙聊天服务');self.resize(420,580);layout=QVBoxLayout(self)
         layout.setContentsMargins(0 if embedded else 12,0 if embedded else 12,0 if embedded else 12,0 if embedded else 12);layout.setSpacing(0)
         header=QHBoxLayout();header.setContentsMargins(0,0,0,0);header.setSpacing(5)
@@ -262,8 +263,10 @@ class ProviderDialog(QDialog):
         title=QLabel('聊天服务');set_theme_style(title,FONT_CSS+'font-size:12px;color:#393343;');header.addWidget(title,1)
         more=chat_symbol('⋯','服务管理',None);menu=QMenu(more);self.services_menu=menu.addMenu('切换服务')
         add=menu.addAction('添加服务');add.triggered.connect(lambda:QTimer.singleShot(0,self,self.add));self.mutation_buttons.append(add);menu.addSeparator()
+        local=menu.addAction('添加本机 ChatGPT');local.triggered.connect(lambda:QTimer.singleShot(0,self,self.add_local));self.mutation_buttons.append(local)
         for text,slot in [('删除当前服务…',self.remove),('清除此服务密钥…',self.clear_key)]:
             action=menu.addAction(text);action.triggered.connect(lambda checked=False,s=slot:QTimer.singleShot(0,self,s));self.mutation_buttons.append(action)
+            if slot==self.clear_key:self.clear_key_action=action
         more.setMenu(menu);more.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup);header.addWidget(more);layout.addLayout(header);layout.addSpacing(8)
         self.body_scroll=hide_scrollbars(QScrollArea());self.body_scroll.setWidgetResizable(True);self.body_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.body_scroll.setObjectName('provider_body_scroll');set_theme_style(self.body_scroll,'QScrollArea#provider_body_scroll{background:transparent;border:0;}')
@@ -274,12 +277,23 @@ class ProviderDialog(QDialog):
         self.confirmation=InlineConfirmation();body_layout.addWidget(self.confirmation)
         self.status=ChatNotice();body_layout.addWidget(self.status)
         form=QVBoxLayout();form.setSpacing(10);body_layout.addLayout(form)
-        self.fields={}
+        self.fields={};self.field_labels={}
         for key,title in [('name','服务名称'),('base_url','接口地址'),('model','模型'),('key','API 密钥')]:
             w=QLineEdit();w.setMinimumWidth(0);w.setFixedHeight(28);self.fields[key]=w
             if key=='key':w.setEchoMode(QLineEdit.EchoMode.Password);w.setPlaceholderText('留空保留；输入新密钥可替换')
             if key=='base_url':w.setPlaceholderText('基础地址或完整 Chat Completions 端点')
-            field=QVBoxLayout();field.setSpacing(5);label=QLabel(title);label.setFixedHeight(16);field.addWidget(label);field.addWidget(w);form.addLayout(field)
+            field=QVBoxLayout();field.setSpacing(5);label=QLabel(title);label.setFixedHeight(16);self.field_labels[key]=label;field.addWidget(label);field.addWidget(w);form.addLayout(field)
+            if key=='model':
+                self.model_choices=QWidget();model_row=QHBoxLayout(self.model_choices);model_row.setContentsMargins(0,0,0,0);model_row.setSpacing(6)
+                self.local_model=QComboBox();self.local_model.setObjectName('local_chat_model');self.local_model.setMinimumWidth(0)
+                self.model_refresh=QPushButton('刷新');self.model_refresh.setToolTip('重新读取本机可用模型');self.model_refresh.clicked.connect(self.refresh_models)
+                model_row.addWidget(self.local_model,1);model_row.addWidget(self.model_refresh);field.addWidget(self.model_choices)
+                self.model_notice=ChatNotice();field.addWidget(self.model_notice)
+                self.local_model.currentIndexChanged.connect(self.choose_model)
+                self.effort_box=QWidget();effort_layout=QVBoxLayout(self.effort_box);effort_layout.setContentsMargins(0,5,0,0);effort_layout.setSpacing(5)
+                effort_layout.addWidget(QLabel('推理强度'));self.effort_choice=QComboBox();self.effort_choice.setObjectName('local_chat_effort');self.effort_choice.setMinimumWidth(0)
+                effort_layout.addWidget(self.effort_choice);self.effort_notice=ChatNotice();effort_layout.addWidget(self.effort_notice);field.addWidget(self.effort_box)
+                self.effort_choice.currentIndexChanged.connect(self.choose_effort)
         self.key_status=ChatNotice()
         self.fields['base_url'].textChanged.connect(self.update_endpoint)
         self.fields['key'].textChanged.connect(self.update_key_status)
@@ -295,7 +309,7 @@ class ProviderDialog(QDialog):
         self.count=QSpinBox();self.count.setRange(2,200);self.count.setValue(self.config.get('history_messages',40));advanced.addRow('历史消息上限',self.count)
         self.chars=QSpinBox();self.chars.setRange(1000,200000);self.chars.setSingleStep(1000);self.chars.setValue(self.config.get('history_chars',24000));advanced.addRow('历史字符上限',self.chars)
         body_layout.addWidget(self.advanced);self.advanced.hide();self.advanced_toggle.toggled.connect(self._toggle_advanced)
-        note=ChatNotice('使用 OpenAI 兼容的 Chat Completions 接口。\n仅主动发送时请求，不会自动发送 Codex 会话。');set_theme_style(note,FONT_CSS+'font-size:10px;color:#706879;background:transparent;');body_layout.addWidget(note)
+        self.connection_note=ChatNotice();set_theme_style(self.connection_note,FONT_CSS+'font-size:12px;color:#706879;background:transparent;');body_layout.addWidget(self.connection_note)
         self.recovery=QPushButton('打开配置目录');self.recovery.clicked.connect(lambda:QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.root))));body_layout.addWidget(self.recovery);self.recovery.hide();body_layout.addStretch()
         footer=QWidget();footer.setObjectName('provider_footer');row=QHBoxLayout(footer);row.setContentsMargins(0,9,0,0);row.setSpacing(7)
         set_theme_style(footer,'QWidget#provider_footer{border-top:1px solid #e4dfea;background:transparent;}')
@@ -311,15 +325,80 @@ class ProviderDialog(QDialog):
         self.advanced.setVisible(visible);self.advanced_toggle.update()
     def prepare_visit(self):
         self.confirmation.cancel();self.body_scroll.verticalScrollBar().setValue(0)
+    def showEvent(self,event):
+        super().showEvent(event);self.refresh_models()
+    def hideEvent(self,event):
+        self.cancel_models();super().hideEvent(event)
+    def cancel_models(self):
+        job,self.models_job=self.models_job,None
+        if job:job.cancel();job.deleteLater()
+        self.model_refresh.setEnabled(True);self.model_notice.setText('')
+    def choose_model(self):
+        value=self.local_model.currentData()
+        if not isinstance(value,str):return
+        self.fields['model'].setText(value);model=self.effort_model()
+        reset=bool(self.effort_value and model is not None and self.effort_value not in model.get('efforts',[]))
+        if reset:self.effort_value=''
+        self.fill_efforts()
+        if reset:self.effort_notice.setText('新模型不支持原强度，已选默认强度；保存后生效。')
+    def effort_model(self):
+        selected=self.fields['model'].text()
+        return next((m for m in self.local_models if (m['model']==selected if selected else m.get('is_default'))),None)
+    def choose_effort(self):
+        value=self.effort_choice.currentData()
+        if isinstance(value,str):self.effort_value=value;self.effort_notice.setText('')
+    def fill_efforts(self):
+        labels={'none':'无','minimal':'最低','low':'低','medium':'中','high':'高','xhigh':'极高','max':'最高','ultra':'Ultra'}
+        model=self.effort_model();efforts=model.get('efforts',[]) if model else []
+        self.effort_choice.blockSignals(True);self.effort_choice.clear();self.effort_choice.addItem('使用默认强度','')
+        for effort in efforts:self.effort_choice.addItem(labels.get(effort,effort),effort)
+        index=self.effort_choice.findData(self.effort_value)
+        if index<0:
+            self.effort_choice.addItem('原设置：'+labels.get(self.effort_value,self.effort_value)+'（待确认）',self.effort_value);index=self.effort_choice.count()-1
+        self.effort_choice.setCurrentIndex(index);self.effort_choice.blockSignals(False)
+        self.effort_choice.setEnabled(bool(efforts) or bool(self.effort_value))
+        self.effort_notice.setText('当前模型不支持原强度，请选择默认或其他可用强度。' if model and self.effort_value and self.effort_value not in efforts else '')
+        if not model and self.local_models and not self.fields['model'].text():
+            self.effort_notice.setText('本机默认模型未在列表中，请选择具体模型后设置强度。')
+    def draft_values(self):
+        return {**{key:w.text() for key,w in self.fields.items()},'timeout':self.timeout.value(),'reasoning_effort':self.effort_value}
+    def fill_models(self):
+        selected=self.fields['model'].text()
+        self.local_model.blockSignals(True);self.local_model.clear();self.local_model.addItem('使用本机默认模型','')
+        for model in self.local_models:
+            self.local_model.addItem(model['name'],model['model'])
+            self.local_model.setItemData(self.local_model.count()-1,model['model'],Qt.ItemDataRole.ToolTipRole)
+        index=self.local_model.findData(selected)
+        if index<0:
+            self.local_model.addItem('原设置：'+selected+'（未在列表中）',selected);index=self.local_model.count()-1
+        self.local_model.setCurrentIndex(index);self.local_model.blockSignals(False)
+        self.fill_efforts()
+    def refresh_models(self):
+        if self.load_error or not self.isVisible() or not self.current or self.current.get('kind')!='chatgpt_local' or self.models_job:return
+        job=HarnessModels(self);self.models_job=job;self.model_refresh.setEnabled(False);self.model_notice.setText('正在读取本机可用模型…')
+        job.loaded.connect(lambda models:self.models_loaded(job,models));job.failed.connect(lambda message:self.models_failed(job,message))
+        job.start()
+    def models_loaded(self,job,models):
+        if job is not self.models_job:return
+        self.local_models=models;self.models_job=None;job.deleteLater();self.model_refresh.setEnabled(True)
+        self.fill_models();self.model_notice.setText('')
+    def models_failed(self,job,message):
+        if job is not self.models_job:return
+        self.models_job=None;job.deleteLater();self.model_refresh.setEnabled(True)
+        self.model_notice.setText(message+' 原选择已保留，可点击刷新重试。')
     def block_writes(self,message):
         self.load_error=message
         self.status.setText('无法安全读取聊天配置或凭据：'+message+' 原文件已保留，暂停保存、删除及清密钥。请先备份配置目录，修复文件或恢复备份后重启桌宠。')
         self.recovery.show()
         for button in self.mutation_buttons:button.setEnabled(False)
     def update_endpoint(self):
+        if self.current and self.current.get('kind')=='chatgpt_local':
+            self.endpoint.setText('桌面 ChatGPT 本地运行环境');return
         try:self.endpoint.setText(endpoint_for({'base_url':self.fields['base_url'].text()}))
         except ProviderValidationError as error:self.endpoint.setText(str(error))
     def update_key_status(self):
+        if self.current and self.current.get('kind')=='chatgpt_local':
+            self.key_status.setText('使用本机 ChatGPT 登录状态，无需 API 密钥。');return
         if self.fields['key'].text():self.key_status.setText('新密钥待保存；不会显示已保存密钥。');return
         if self.load_error:self.key_status.setText('暂时无法读取已保存密钥状态。');return
         try:present=provider_key_present(self.root,self.current or {'id':''})
@@ -328,10 +407,11 @@ class ProviderDialog(QDialog):
         self.fields['key'].setPlaceholderText('留空保留已存密钥' if present else '未存密钥，免密服务可留空')
     def validation_failed(self,error):
         self.status.setText(str(error)+' 配置尚未保存。')
-        field=self.timeout if error.field=='timeout' else self.fields.get(error.field)
+        field=self.timeout if error.field=='timeout' else self.effort_choice if error.field=='reasoning_effort' else self.fields.get(error.field)
         if field:
             if field is self.timeout:self.advanced_toggle.setChecked(True)
-            self.body_scroll.ensureWidgetVisible(field);field.setFocus();field.selectAll()
+            self.body_scroll.ensureWidgetVisible(field);field.setFocus()
+            if hasattr(field,'selectAll'):field.selectAll()
     def reload(self):
         self.current=None
         self.select.blockSignals(True);self.select.clear()
@@ -342,18 +422,38 @@ class ProviderDialog(QDialog):
             action=self.services_menu.addAction(provider.get('name','未命名'));action.setCheckable(True);action.setChecked(index==self.select.currentIndex())
             action.triggered.connect(lambda checked=False,i=index:self.select.setCurrentIndex(i))
     def change(self):
+        self.cancel_models()
         self.confirmation.cancel()
-        if self.current:self.drafts[self.current['id']]={**{key:w.text() for key,w in self.fields.items()},'timeout':self.timeout.value()}
+        if self.current:self.drafts[self.current['id']]=self.draft_values()
         self.current=next((p for p in self.config.get('providers',[]) if p['id']==self.select.currentData()),None)
         values=self.drafts.get(self.current['id'],self.current) if self.current else {}
         for k,w in self.fields.items():w.setText(values.get(k,''))
+        self.effort_value=values.get('reasoning_effort','')
+        local=bool(self.current and self.current.get('kind')=='chatgpt_local')
+        self.clear_key_action.setVisible(not local)
+        for key in ('base_url','key'):
+            self.fields[key].setVisible(not local);self.field_labels[key].setVisible(not local)
+        self.fields['model'].setVisible(not local);self.model_choices.setVisible(local)
+        self.effort_box.setVisible(local)
+        self.fields['model'].setPlaceholderText('服务提供的准确模型名称')
+        self.fill_models()
+        self.connection_note.setText('复用本机 ChatGPT 登录和额度，无需 API 密钥。仅主动发送本页对话。' if local else '使用 OpenAI 兼容的 Chat Completions 接口。仅主动发送时请求，不会自动发送 Codex 会话。')
         self.timeout.setValue(values.get('timeout',90))
         self.update_endpoint();self.update_key_status()
+        if local:QTimer.singleShot(0,self,self.refresh_models)
     def add(self):
         if self.load_error:return
-        if self.current:self.drafts[self.current['id']]={**{key:w.text() for key,w in self.fields.items()},'timeout':self.timeout.value()}
+        if self.current:self.drafts[self.current['id']]=self.draft_values()
         self.config.setdefault('providers',[]).append(dict(id=uuid.uuid4().hex,name='新服务',base_url='',model='',timeout=90))
         self.config['active']=self.config['providers'][-1]['id'];self.reload()
+    def add_local(self):
+        if self.load_error:return
+        if self.current:self.drafts[self.current['id']]=self.draft_values()
+        provider=next((p for p in self.config['providers'] if p.get('kind')=='chatgpt_local'),None)
+        if provider is None:
+            provider=dict(id=uuid.uuid4().hex,kind='chatgpt_local',name='本机 ChatGPT',base_url='',model='',timeout=90)
+            self.config['providers'].append(provider)
+        self.config['active']=provider['id'];self.reload()
     def remove(self):
         if self.load_error or not self.current:return
         key=self.current['id'];name=self.fields['name'].text().strip() or self.current.get('name','未命名服务')
@@ -388,11 +488,18 @@ class ProviderDialog(QDialog):
     def save(self):
         if self.load_error:return
         entered={key:w.text().strip() for key,w in self.fields.items()};timeout=self.timeout.value()
-        try:normalized=normalize_provider({key:value for key,value in entered.items() if key!='key'}|{'timeout':timeout})
+        entered['reasoning_effort']=self.effort_value
+        kind=self.current.get('kind','openai') if self.current else 'openai'
+        model=self.effort_model() if kind=='chatgpt_local' else None
+        if model and self.effort_value and self.effort_value not in model.get('efforts',[]):
+            self.validation_failed(ProviderValidationError('当前模型不支持所选推理强度，请重新选择。','reasoning_effort'));return
+        try:normalized=normalize_provider({key:value for key,value in entered.items() if key!='key'}|{'timeout':timeout,'kind':kind})
         except ProviderValidationError as error:self.validation_failed(error);return
         if not self.current:
             self.add()
-            for key,value in entered.items():self.fields[key].setText(value)
+            for key,value in entered.items():
+                if key in self.fields:self.fields[key].setText(value)
+            self.effort_value=entered['reasoning_effort']
             self.timeout.setValue(timeout)
         candidate=copy.deepcopy(self.config)
         current=next(p for p in candidate['providers'] if p['id']==self.current['id'])
@@ -470,7 +577,7 @@ class ChatWindow(QWidget):
             service=next((p for p in config.get('providers',[]) if p['id']==config.get('active')),None)
         except OSError:config={};service=None
         self._service_name=service.get('name','聊天服务') if service else '设置聊天服务'
-        self._service_model=service.get('model','') if service else '尚未配置'
+        self._service_model=(service.get('model') or ('本机默认模型' if service.get('kind')=='chatgpt_local' else '')) if service else '尚未配置'
         if config.get('service')=='chatgpt':
             from chatgpt_oauth import ChatGPTAccount
             self._service_name='ChatGPT 套餐 · 预览'
@@ -742,7 +849,7 @@ class ChatWindow(QWidget):
         if not retry:messages.append(dict(role='user',content=text))
         prompt=self.pet.manifest.get('systemPrompt') or config.get('system_prompt',CHAT_DEFAULT['system_prompt'])
         payload=[dict(role='system',content=prompt)]+trim_messages(messages,config.get('history_messages',40),config.get('history_chars',24000))
-        stream=stream_type(self);self.stream=stream;self.partial='';self.busy=True
+        stream=(HarnessStream(self) if provider.get('kind')=='chatgpt_local' else stream_type(self));self.stream=stream;self.partial='';self.busy=True
         stream.delta.connect(lambda value:self.on_delta(stream,value));stream.done.connect(lambda value:self.on_done(stream,value))
         stream.failed.connect(lambda message:self.on_error(stream,message))
         try:stream.start(provider,key,payload)

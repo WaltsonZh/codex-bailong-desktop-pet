@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from PySide6.QtCore import QObject,Signal
 
 os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
 from PySide6.QtWidgets import QApplication,QWidget,QDialog
@@ -15,6 +16,14 @@ from desktop_core import atomic_json
 from desktop_services import SecretStore
 
 APP=QApplication.instance() or QApplication([])
+
+
+class FakeModels(QObject):
+    loaded=Signal(object)
+    failed=Signal(str)
+    def __init__(self,parent=None):super().__init__(parent);self.cancelled=False;self.started=False
+    def start(self):self.started=True
+    def cancel(self):self.cancelled=True
 
 
 class ChatConfigUiTests(unittest.TestCase):
@@ -108,6 +117,90 @@ class ChatConfigUiTests(unittest.TestCase):
         chat=self.chat();chat.input.setPlainText('draft');chat.provider();dialog=chat.provider_dialog
         dialog.fields['base_url'].setText('http://localhost/v1');dialog.fields['model'].setText('test');dialog.save()
         self.assertEqual(chat.pages.currentWidget(),chat.chat_body);self.assertEqual(chat.input.toPlainText(),'draft');self.assertIn('尚未验证连通',chat.status.text())
+    def test_local_service_save_reopen_and_switch_preserves_api_draft(self):
+        self.seed();dialog=self.dialog();dialog.fields['model'].setText('api-draft');dialog.add_local()
+        self.assertTrue(dialog.fields['base_url'].isHidden());self.assertTrue(dialog.fields['key'].isHidden())
+        self.assertIn('无需 API 密钥',dialog.connection_note.text());dialog.add_local()
+        self.assertEqual(len(dialog.config['providers']),2);dialog.save()
+        saved=load_chat_config(self.root);self.assertEqual(saved['providers'][0]['model'],'test-model')
+        self.assertEqual(saved['providers'][1]['kind'],'chatgpt_local');self.assertEqual(saved['providers'][1]['model'],'')
+        again=self.dialog();self.assertEqual(again.current['kind'],'chatgpt_local')
+        dialog.select.setCurrentIndex(0);self.assertEqual(dialog.fields['model'].text(),'api-draft')
+        self.assertFalse(dialog.fields['base_url'].isHidden())
+    def test_local_send_uses_harness_without_reading_api_key_and_ignores_late_reply(self):
+        config=self.seed();config['providers'][0].update(kind='chatgpt_local',base_url='',model='');atomic_json(self.root/'chat.json',config)
+        chat=self.chat();chat.input.setPlainText('你好')
+        with patch('chat_window.HarnessStream') as harness,patch('chat_window.ChatStream') as api,patch('chat_config._store',side_effect=AssertionError('must not read API secrets')):
+            chat.send();api.assert_not_called();stream=harness.return_value
+            self.assertTrue(chat.busy);self.assertEqual(stream.start.call_args.args[1],'')
+            self.assertEqual(stream.start.call_args.args[2][-1],dict(role='user',content='你好'))
+            chat.stop();chat.on_done(stream,'迟到内容');chat.on_delta(stream,'迟到内容')
+        self.assertEqual(chat.session['messages'],[dict(role='user',content='你好')]);self.assertFalse(chat.busy)
+    def local_dialog(self,model=''):
+        config=self.seed();config['providers'][0].update(kind='chatgpt_local',model=model,base_url='')
+        atomic_json(self.root/'chat.json',config)
+        dialog=self.dialog();dialog.show();APP.processEvents();return dialog
+    @patch('chat_window.HarnessModels',FakeModels)
+    def test_local_model_menu_load_select_save_and_reopen(self):
+        dialog=self.local_dialog();job=dialog.models_job
+        self.assertTrue(job.started);self.assertTrue(dialog.fields['model'].isHidden())
+        self.assertFalse(dialog.model_choices.isHidden());self.assertIn('正在读取',dialog.model_notice.text())
+        job.loaded.emit([dict(model='local-a',name='模型 A'),dict(model='local-b',name='模型 B')])
+        self.assertEqual(dialog.local_model.count(),3);self.assertEqual(dialog.local_model.itemData(0),'')
+        dialog.local_model.showPopup();APP.processEvents()
+        panel=dialog.local_model._panel;self.assertIsNotNone(panel)
+        panel.choose(panel.list.item(2));self.assertEqual(dialog.fields['model'].text(),'local-b')
+        dialog.save();saved=load_chat_config(self.root);self.assertEqual(saved['providers'][0]['model'],'local-b')
+        again=self.dialog();self.assertEqual(again.fields['model'].text(),'local-b')
+        self.assertEqual(again.local_model.currentData(),'local-b')
+        again.local_model.setCurrentIndex(0);again.save()
+        self.assertEqual(load_chat_config(self.root)['providers'][0]['model'],'')
+    @patch('chat_window.HarnessModels',FakeModels)
+    def test_catalog_refresh_and_failure_keep_current_choice_and_cached_list(self):
+        dialog=self.local_dialog('saved-model');job=dialog.models_job
+        job.loaded.emit([dict(model='available-model',name='可用模型')])
+        self.assertEqual(dialog.fields['model'].text(),'saved-model');self.assertIn('未在列表中',dialog.local_model.currentText())
+        dialog.local_model.setCurrentIndex(dialog.local_model.findData('available-model'))
+        dialog.refresh_models();job=dialog.models_job;job.failed.emit('登录暂不可读')
+        self.assertEqual(dialog.fields['model'].text(),'available-model');self.assertEqual(dialog.local_model.currentData(),'available-model')
+        self.assertGreaterEqual(dialog.local_model.findData('available-model'),0);self.assertTrue(dialog.model_refresh.isEnabled())
+        self.assertIn('原选择已保留',dialog.model_notice.text())
+        dialog.refresh_models();self.assertIsNotNone(dialog.models_job)
+    @patch('chat_window.HarnessModels',FakeModels)
+    def test_hidden_or_switched_service_ignores_stale_catalog_and_preserves_draft(self):
+        dialog=self.local_dialog('saved-model');old=dialog.models_job
+        dialog.hide();self.assertTrue(old.cancelled);self.assertIsNone(dialog.models_job)
+        old.loaded.emit([dict(model='stale',name='迟到模型')]);self.assertEqual(dialog.local_models,[])
+        dialog.show();APP.processEvents();job=dialog.models_job
+        dialog.add();self.assertTrue(job.cancelled);self.assertFalse(dialog.fields['model'].isHidden())
+        job.failed.emit('迟到错误');self.assertNotIn('迟到错误',dialog.model_notice.text())
+        dialog.select.setCurrentIndex(0);self.assertEqual(dialog.fields['model'].text(),'saved-model')
+    @patch('chat_window.HarnessModels',FakeModels)
+    def test_effort_uses_model_capabilities_and_saved_selection_reopens(self):
+        dialog=self.local_dialog();job=dialog.models_job
+        models=[dict(model='model-a',name='模型 A',efforts=['low','medium','high'],is_default=True),dict(model='model-b',name='模型 B',efforts=['low'])]
+        job.loaded.emit(models)
+        self.assertEqual([dialog.effort_choice.itemData(i) for i in range(dialog.effort_choice.count())],['','low','medium','high'])
+        dialog.effort_choice.setCurrentIndex(dialog.effort_choice.findData('high'));self.assertEqual(dialog.effort_value,'high')
+        dialog.save();self.assertEqual(load_chat_config(self.root)['providers'][0]['reasoning_effort'],'high')
+        again=self.dialog();self.assertEqual(again.effort_value,'high')
+        again.local_models=models;again.fill_models();again.local_model.setCurrentIndex(again.local_model.findData('model-b'))
+        self.assertEqual(again.effort_value,'');self.assertIn('新模型不支持',again.effort_notice.text())
+        self.assertEqual([again.effort_choice.itemData(i) for i in range(again.effort_choice.count())],['','low'])
+    @patch('chat_window.HarnessModels',FakeModels)
+    def test_effort_refresh_failure_and_service_switch_preserve_draft(self):
+        dialog=self.local_dialog('model-a');models=[dict(model='model-a',name='模型 A',efforts=['high'])]
+        dialog.models_job.loaded.emit(models);dialog.effort_choice.setCurrentIndex(dialog.effort_choice.findData('high'))
+        dialog.refresh_models();dialog.models_job.failed.emit('暂时失败');self.assertEqual(dialog.effort_value,'high')
+        dialog.add();self.assertTrue(dialog.effort_box.isHidden());dialog.select.setCurrentIndex(0)
+        self.assertEqual(dialog.effort_value,'high')
+        APP.processEvents()
+        dialog.models_job.loaded.emit(models);self.assertEqual(dialog.effort_value,'high')
+        dialog.refresh_models();dialog.models_job.loaded.emit([dict(model='model-a',name='模型 A',efforts=['low'])])
+        self.assertEqual(dialog.effort_value,'high');self.assertIn('不支持原强度',dialog.effort_notice.text())
+        before=(self.root/'chat.json').read_bytes();dialog.save();self.assertEqual((self.root/'chat.json').read_bytes(),before)
+        self.assertIn('不支持所选推理强度',dialog.status.text())
+        dialog.effort_choice.setCurrentIndex(0);dialog.save();self.assertEqual(load_chat_config(self.root)['providers'][0]['reasoning_effort'],'')
 
 
 if __name__=='__main__':unittest.main()

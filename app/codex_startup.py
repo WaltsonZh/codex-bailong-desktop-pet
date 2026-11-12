@@ -84,9 +84,11 @@ def configure(value,executable=None):
 def desktop_executable(path):
     """Exclude Codex CLI, ChatGPT-only packages and Electron helper processes."""
     value=str(path).lower().replace('/','\\')
-    name=value.rsplit('\\',1)[-1]
+    folder, _, name = value.rpartition('\\')
     if name not in ('chatgpt.exe','codex.exe'):return False
-    if '\\openai.codex_' in value:return True
+    if '\\openai.codex_' in value:
+        # The Store app also ships its CLI as app/resources/codex.exe.
+        return name=='chatgpt.exe' or not folder.endswith('\\resources')
     # Codex++'s managed Store copy retains OpenAI.Codex_ in its path above.
     # Also accept a standalone Codex GUI only when its Electron bundle exists.
     return name=='codex.exe' and (Path(path).parent/'resources/app.asar').is_file()

@@ -40,14 +40,22 @@ def endpoint_for(provider):
 
 
 def normalize_provider(provider):
-    endpoint_for(provider)
+    kind = provider.get('kind', 'openai')
+    if kind not in ('openai', 'chatgpt_local'):
+        raise ProviderValidationError('无法识别聊天服务类型，请重新选择服务。', 'name')
+    if kind != 'chatgpt_local':
+        endpoint_for(provider)
     model = provider.get('model', '')
-    if not isinstance(model, str) or not model.strip() or re.search(r'[\x00-\x1f\x7f]', model):
+    if not isinstance(model, str) or (not model.strip() and kind != 'chatgpt_local') or re.search(r'[\x00-\x1f\x7f]', model):
         raise ProviderValidationError('请填写服务提供的准确模型名称。', 'model')
     timeout = provider.get('timeout', 90)
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 5 <= timeout <= 600:
         raise ProviderValidationError('超时需为 5—600 秒。', 'timeout')
-    return dict(provider, base_url=provider['base_url'].strip().rstrip('/'), model=model.strip(), timeout=int(timeout))
+    if kind == 'chatgpt_local':
+        effort = provider.get('reasoning_effort', '')
+        if not isinstance(effort, str) or len(effort)>80 or re.search(r'[\x00-\x20\x7f]', effort):
+            raise ProviderValidationError('推理强度格式无效，请从选单重新选择。', 'reasoning_effort')
+    return dict(provider, base_url='' if kind == 'chatgpt_local' else provider['base_url'].strip().rstrip('/'), model=model.strip(), timeout=int(timeout))
 
 
 def safe_detail(value, key=''):

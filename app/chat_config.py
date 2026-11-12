@@ -37,7 +37,7 @@ def _validated(value):
         identity=provider.get('id')
         if not isinstance(identity,str) or not identity or identity in seen:raise _invalid()
         seen.add(identity)
-        for name in ('name','base_url','model','credential_id'):
+        for name in ('name','base_url','model','credential_id','kind','reasoning_effort'):
             if name in provider and not isinstance(provider[name],str):raise _invalid()
         if 'timeout' in provider and (type(provider['timeout']) is not int or not 5<=provider['timeout']<=600):raise _invalid()
         # The editor never persists plaintext keys, including accidental draft fields.
@@ -72,6 +72,7 @@ def _reference(provider):
 
 
 def load_provider_key(root,provider):
+    if provider.get('kind')=='chatgpt_local':return ''
     store=_store(root);reference=_reference(provider)
     if reference:return store.get(reference)
     store.read() # A damaged document must not look like a clean, empty key field.
@@ -79,6 +80,7 @@ def load_provider_key(root,provider):
 
 
 def provider_key_present(root,provider):
+    if provider.get('kind')=='chatgpt_local':return False
     return bool(_store(root).read().get(_reference(provider)))
 
 
@@ -100,11 +102,14 @@ def save_chat_config(root,config,provider_id=None,key=''):
     Blank keys keep the *persisted* reference, including an explicit clear. A
     draft opened before clearing a key cannot silently resurrect that old key.
     """
-    persisted=load_chat_config(root);store=_store(root);store.read()
+    persisted=load_chat_config(root);store=_store(root)
     candidate=_validated(config);_preserve_references(candidate,persisted)
     if not isinstance(key,str):raise OSError('密钥格式无效。')
     provider=next((p for p in candidate['providers'] if p['id']==provider_id),None)
     if provider_id is not None and provider is None:raise OSError('待保存的模型服务不存在。')
+    local=provider is not None and provider.get('kind')=='chatgpt_local'
+    if local and key:raise OSError('本机 ChatGPT 使用自己的登录状态，无需 API 密钥。')
+    if not local:store.read()
     if key:
         if provider is None:raise OSError('请先选择需要保存密钥的服务。')
         reference='chat:'+provider['id']+':'+uuid.uuid4().hex

@@ -50,6 +50,8 @@ Windows 主程序可选择一个 WSL 发行版和用户，读取 Linux 会话日
 
 ## 关键模块
 
+本地 1.6.0 源码支持[本机 ChatGPT 聊天](本机ChatGPT聊天.md)、本机模型及推理强度选单，尚未公开发布。`chat_harness` 连接桌面应用随附的本地 app-server，按 `model/list` 分页读取型号及能力，以 `config/read` 匹配实际默认模型，显式强度写入 `turn/start.effort`；`chat_transport` 继续处理原有 Chat Completions 服务，`chat_window` 复用原有记录和流式显示。
+
 | 模块 | 作用 |
 | --- | --- |
 | desktop / enhanced | 人物、卡片、后台服务与生命周期 |
