@@ -85,7 +85,11 @@ def desktop_executable(path):
     """Exclude Codex CLI, ChatGPT-only packages and Electron helper processes."""
     value=str(path).lower().replace('/','\\')
     folder, _, name = value.rpartition('\\')
+    folder, _, name = value.rpartition('\\')
     if name not in ('chatgpt.exe','codex.exe'):return False
+    if '\\openai.codex_' in value:
+        # The Store app also ships its CLI as app/resources/codex.exe.
+        return name=='chatgpt.exe' or not folder.endswith('\\resources')
     if '\\openai.codex_' in value:
         # The Store app also ships its CLI as app/resources/codex.exe.
         return name=='chatgpt.exe' or not folder.endswith('\\resources')
