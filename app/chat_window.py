@@ -238,6 +238,7 @@ class AccountJob(QObject):
             except RuntimeError:pass  # The application can close during I/O.
         threading.Thread(target=run,name='BailongChatGPT',daemon=True).start()
 from chat_harness import HarnessStream,HarnessModels
+from chat_harness import HarnessStream,HarnessModels
 
 class ProviderDialog(QDialog):
     def __init__(self,root,parent=None,embedded=False):
@@ -849,7 +850,7 @@ class ChatWindow(QWidget):
         if not retry:messages.append(dict(role='user',content=text))
         prompt=self.pet.manifest.get('systemPrompt') or config.get('system_prompt',CHAT_DEFAULT['system_prompt'])
         payload=[dict(role='system',content=prompt)]+trim_messages(messages,config.get('history_messages',40),config.get('history_chars',24000))
-        stream=(HarnessStream(self) if provider.get('kind')=='chatgpt_local' else stream_type(self));self.stream=stream;self.partial='';self.busy=True
+        stream=(HarnessStream(self) if provider.get('kind')=='chatgpt_local' else (HarnessStream(self) if provider.get('kind')=='chatgpt_local' else stream_type(self)));self.stream=stream;self.partial='';self.busy=True
         stream.delta.connect(lambda value:self.on_delta(stream,value));stream.done.connect(lambda value:self.on_done(stream,value))
         stream.failed.connect(lambda message:self.on_error(stream,message))
         try:stream.start(provider,key,payload)

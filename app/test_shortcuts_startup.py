@@ -139,11 +139,18 @@ class StartupTests(unittest.TestCase):
             p=Mock(pid=pid,info={'name':Path(path).name});p.exe.return_value=path;p.cmdline.return_value=args;p.create_time.return_value=100.;return p
         gui=str(self.root/'OpenAI.Codex_123/app/ChatGPT.exe');cli=str(self.root/'OpenAI/Codex/bin/123/codex.exe');chat=str(self.root/'OpenAI.ChatGPT_123/ChatGPT.exe')
         bundled_cli=str(Path(gui).parent/'resources/codex.exe')
+        bundled_cli=str(Path(gui).parent/'resources/codex.exe')
         values=[
+            
             process(1,gui,[gui]),
+            
             process(2,gui,[gui,'--type=renderer']),
+            
             process(3,cli,[cli]),
+            
             process(4,chat,[chat]),
+            process(5,bundled_cli,[bundled_cli,'app-server']),
+        ,
             process(5,bundled_cli,[bundled_cli,'app-server']),
         ]
         with patch.object(cs.psutil,'process_iter',return_value=values):self.assertEqual(cs.desktop_sessions(),{(1,100.)})
